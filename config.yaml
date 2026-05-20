@@ -1,0 +1,34 @@
+name: Daily Digest Renderer
+version: "0.1.0"
+slug: daily_digest_renderer
+description: Local matplotlib renderer for the daily Home Assistant power digest
+url: "https://local/addons/daily-digest-renderer"
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+init: false
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Daily digest renderer HTTP API
+webui: "http://[HOST]:[PORT:8099]/health"
+homeassistant_api: true
+hassio_api: true
+options:
+  ha_url: "http://supervisor/core"
+  ha_token: ""
+  ntfy_url: "https://ntfy.3lancers.dev"
+  ntfy_token: ""
+  ntfy_topic: "heartbeat"
+  listen_host: "0.0.0.0"
+  listen_port: 8099
+schema:
+  ha_url: str
+  ha_token: password?
+  ntfy_url: str
+  ntfy_token: password
+  ntfy_topic: str
+  listen_host: str
+  listen_port: int
