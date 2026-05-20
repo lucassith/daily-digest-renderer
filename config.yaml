@@ -1,5 +1,5 @@
 name: Daily Digest Renderer
-version: "0.1.0"
+version: "0.2.0"
 slug: daily_digest_renderer
 description: Local matplotlib renderer for the daily Home Assistant power digest
 url: "https://local/addons/daily-digest-renderer"

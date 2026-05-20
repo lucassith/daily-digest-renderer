@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +21,11 @@ POWER_STAT_IDS = [
     "sensor.inverter_grid_power",
     "sensor.inverter_battery_power",
     "sensor.weather_station_weather_station_temperature",
+]
+
+BATTERY_24H_STAT_IDS = [
+    "sensor.inverter_battery",
+    "sensor.inverter_battery_power",
 ]
 
 ENERGY_ENTITY_IDS = [
@@ -183,6 +188,29 @@ def build_digest(settings: Settings) -> DigestResult:
     return DigestResult(message=message, chart_png=chart_png, filename=filename)
 
 
+def build_battery_digest(settings: Settings) -> DigestResult:
+    ha = HomeAssistantClient(settings.ha_url, settings.ha_token)
+    ha_config = ha.get_config()
+    tz = ZoneInfo(ha_config.get("time_zone") or "UTC")
+    now = datetime.now(tz)
+    start = now - timedelta(hours=24)
+
+    all_states = ha.get_states()
+    state_by_id = {state["entity_id"]: state for state in all_states}
+    battery_stats = ha.get_statistics(
+        statistic_ids=BATTERY_24H_STAT_IDS,
+        start_time=start,
+        end_time=now,
+        period="hour",
+        types=["mean", "min", "max"],
+    )
+
+    message = build_battery_message(now, battery_stats, state_by_id)
+    chart_png = render_battery_chart(now, battery_stats, state_by_id)
+    filename = f"battery_24h_{now:%Y%m%d_%H%M}.png"
+    return DigestResult(message=message, chart_png=chart_png, filename=filename)
+
+
 def build_message(
     now: datetime,
     power_stats: dict[str, list[dict[str, Any]]],
@@ -244,6 +272,36 @@ def build_message(
         f"backup={state_value(state_by_id, 'sensor.backup_last_successful_automatic_backup')}, "
         f"UPS={state_value(state_by_id, 'sensor.ups_status_data')} "
         f"{state_value(state_by_id, 'sensor.ups_battery_charge')}%",
+    ]
+    return "\n".join(lines)
+
+
+def build_battery_message(
+    now: datetime,
+    battery_stats: dict[str, list[dict[str, Any]]],
+    state_by_id: dict[str, dict[str, Any]],
+) -> str:
+    soc_rows = battery_stats.get("sensor.inverter_battery", [])
+    power_rows = battery_stats.get("sensor.inverter_battery_power", [])
+    max_charge_power = abs(min(0.0, min_value(power_rows, "min")))
+    max_discharge_power = max(0.0, max_value(power_rows, "max"))
+    min_soc = min_value(soc_rows, "min")
+    max_soc = max_value(soc_rows, "max")
+    avg_soc = average_value(soc_rows, "mean")
+    min_soc_time = row_start_label(min_row(soc_rows, "min"))
+    max_soc_time = row_start_label(max_row(soc_rows, "max"))
+
+    lines = [
+        f"Battery 24h digest {now:%Y-%m-%d %H:%M}",
+        "Battery: "
+        f"current={state_value(state_by_id, 'sensor.inverter_battery')}%, "
+        f"state={state_value(state_by_id, 'sensor.inverter_battery_state')}",
+        f"SOC 24h: min={one_decimal(min_soc)}% at {min_soc_time}, "
+        f"avg={one_decimal(avg_soc)}%, max={one_decimal(max_soc)}% at {max_soc_time}",
+        f"Power 24h: max charge={whole(max_charge_power)} W, max discharge={whole(max_discharge_power)} W",
+        "Energy today: "
+        f"charge={state_value(state_by_id, 'sensor.inverter_today_battery_charge')} kWh, "
+        f"discharge={state_value(state_by_id, 'sensor.inverter_today_battery_discharge')} kWh",
     ]
     return "\n".join(lines)
 
@@ -310,8 +368,76 @@ def render_chart(
     return buffer.getvalue()
 
 
+def render_battery_chart(
+    now: datetime,
+    battery_stats: dict[str, list[dict[str, Any]]],
+    state_by_id: dict[str, dict[str, Any]],
+) -> bytes:
+    soc_rows = battery_stats.get("sensor.inverter_battery", [])
+    power_rows = battery_stats.get("sensor.inverter_battery_power", [])
+    labels = [row_start_label(row) for row in soc_rows]
+    soc = [float(row.get("mean") or 0.0) for row in soc_rows]
+    power = [float(row.get("mean") or 0.0) / 1000.0 for row in power_rows]
+
+    fig, ax_soc = plt.subplots(figsize=(12, 6.5), dpi=130)
+    ax_soc.plot(labels, soc, label="Battery SOC %", color="#16a34a", linewidth=2.4)
+    ax_soc.set_ylabel("Battery charge (%)")
+    ax_soc.set_ylim(max(0, min(soc) - 5) if soc else 0, min(105, max(soc) + 5) if soc else 105)
+    ax_soc.grid(True, axis="y", alpha=0.25)
+    ax_soc.tick_params(axis="x", labelrotation=45)
+
+    ax_power = ax_soc.twinx()
+    ax_power.plot(labels, power, label="Battery power kW", color="#a855f7", linewidth=2.0)
+    ax_power.axhline(0, color="#444444", linewidth=0.8)
+    ax_power.set_ylabel("Battery power (kW)")
+
+    min_soc_row = min_row(soc_rows, "min")
+    max_soc_row = max_row(soc_rows, "max")
+    for row, label, color in (
+        (min_soc_row, "min", "#dc2626"),
+        (max_soc_row, "max", "#166534"),
+    ):
+        if row and labels:
+            row_index = soc_rows.index(row)
+            row_value = float(row.get("mean") or row.get("min") or row.get("max") or 0.0)
+            ax_soc.scatter(labels[row_index], row_value, color=color, zorder=5)
+            ax_soc.annotate(
+                f"{label} {row_value:.1f}%",
+                xy=(labels[row_index], row_value),
+                xytext=(8, 12 if label == "max" else -18),
+                textcoords="offset points",
+                fontsize=9,
+                arrowprops={"arrowstyle": "->", "color": color},
+            )
+
+    title = (
+        f"Current {state_value(state_by_id, 'sensor.inverter_battery')}% | "
+        f"State {state_value(state_by_id, 'sensor.inverter_battery_state')} | "
+        f"Charge today {state_value(state_by_id, 'sensor.inverter_today_battery_charge')} kWh | "
+        f"Discharge today {state_value(state_by_id, 'sensor.inverter_today_battery_discharge')} kWh"
+    )
+    fig.suptitle(f"Battery charge last 24h {now:%Y-%m-%d %H:%M}", fontsize=15, fontweight="bold")
+    ax_soc.set_title(title, fontsize=10)
+
+    handles_soc, labels_soc = ax_soc.get_legend_handles_labels()
+    handles_power, labels_power = ax_power.get_legend_handles_labels()
+    ax_soc.legend(handles_soc + handles_power, labels_soc + labels_power, loc="upper left")
+
+    fig.tight_layout()
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return buffer.getvalue()
+
+
 def series(stats: dict[str, list[dict[str, Any]]], entity_id: str, *, scale: float) -> list[float]:
     return [float(row.get("mean") or 0.0) / scale for row in stats.get(entity_id, [])]
+
+
+def min_row(rows: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    return min(rows, key=lambda row: float(row.get(key) or 0.0))
 
 
 def max_row(rows: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
@@ -377,6 +503,7 @@ class DigestRequestHandler(BaseHTTPRequestHandler):
 
         try:
             result = build_digest(self.settings)
+            battery_result = build_battery_digest(self.settings)
             ntfy = NtfyClient(self.settings.ntfy_url, self.settings.ntfy_token, self.settings.ntfy_topic)
             ntfy.publish_png(
                 title="HA daily power digest",
@@ -384,13 +511,30 @@ class DigestRequestHandler(BaseHTTPRequestHandler):
                 filename=result.filename,
                 png=result.chart_png,
             )
+            ntfy.publish_png(
+                title="HA battery 24h",
+                message=battery_result.message,
+                filename=battery_result.filename,
+                png=battery_result.chart_png,
+            )
             self._write_json(
                 200,
                 {
                     "success": True,
-                    "filename": result.filename,
-                    "chart_bytes": len(result.chart_png),
-                    "message": result.message,
+                    "messages": [
+                        {
+                            "title": "HA daily power digest",
+                            "filename": result.filename,
+                            "chart_bytes": len(result.chart_png),
+                            "message": result.message,
+                        },
+                        {
+                            "title": "HA battery 24h",
+                            "filename": battery_result.filename,
+                            "chart_bytes": len(battery_result.chart_png),
+                            "message": battery_result.message,
+                        },
+                    ],
                 },
             )
         except Exception as exc:  # noqa: BLE001 - return operational errors to HA trace.

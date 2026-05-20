@@ -1,6 +1,6 @@
 # Daily Digest Renderer
 
-Local Home Assistant add-on that renders the daily power digest chart with Python and matplotlib, then publishes the digest to ntfy.
+Local Home Assistant add-on that renders daily power and 24-hour battery charts with Python and matplotlib, then publishes both digests to ntfy.
 
 ## Install
 
@@ -40,7 +40,7 @@ Add this to `configuration.yaml` or your shell command include:
 ```yaml
 shell_command:
   send_daily_digest: >-
-    curl -sS -X POST http://daily-digest-renderer:8099/send-digest
+    curl -sS -X POST http://local-daily-digest-renderer:8099/send-digest
 ```
 
 If add-on DNS does not resolve from Home Assistant Core, use the Home Assistant host address and mapped port:
@@ -73,8 +73,11 @@ Keep `automation.ha_heartbeat_power_status` as the 19:00 trigger that calls `scr
 From the HA terminal:
 
 ```bash
-curl -sS http://daily-digest-renderer:8099/health
-curl -sS -X POST http://daily-digest-renderer:8099/send-digest
+curl -sS http://local-daily-digest-renderer:8099/health
+curl -sS -X POST http://local-daily-digest-renderer:8099/send-digest
 ```
 
-Expected result: ntfy receives one message on `heartbeat` with one PNG attachment.
+Expected result: ntfy receives two messages on `heartbeat`:
+
+- `HA daily power digest` with the daily power PNG.
+- `HA battery 24h` with the 24-hour battery SOC PNG.
